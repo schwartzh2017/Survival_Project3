@@ -55,9 +55,7 @@ allDataMonth_ds = allDataMonth_laravel_ds %>%
   rbind(allDataMonth_r_ds) %>%
   rbind(allDataMonth_wp_ds)
 
-# user vs organization: survival time of repos
-evolutionPaths_ds %>%
-  mutate(pathlist = str_split(path, '-'))
+# descriptive plots; number of repos per status by repo type, repo size
 
 ggplot(data = meta_ds, aes(x = status, fill = repoType)) +
   geom_bar(position = 'dodge') +
@@ -72,11 +70,6 @@ ggplot(data = meta_ds, aes(x = status, fill = factor(sizeUsers))) +
        title = 'Current Status of Repository by Size of Userbase',
        fill = "Size of Repository Userbase") +
   theme_minimal()
-
-km.meta_org_v_user = survfit(Surv(months)~status, data = meta_ds)
-summary(km.meta_org_v_user)
-
-ggsurvplot(data = meta_ds, fit = km.meta_org_v_user)
 
 # number of commits, organization vs user
 km.commits_org_v_user = survfit(Surv(commits)~type, data = oracle_ds)
@@ -113,6 +106,7 @@ AIC(survreg(Surv(commits)~type,data=oracle_ds, dist = "lognormal"))
 AIC(survreg(Surv(commits)~type,data=oracle_ds, dist = "weibull"))
 AIC(survreg(Surv(commits)~type,data=oracle_ds, dist = "exp"))
 
+# degradation path: number of status changes over lifetime
 try = evolutionPaths_ds %>%
   mutate(path_list = str_split(path, '-'))
 
@@ -182,9 +176,7 @@ mcf_ds %>%
   theme_minimal() +
   xlim(0,150)
 
-km.mcf = survreg(Surv(avgEvents)~time, data = mcf_ds, dist = 'lognormal')
 
-AIC(km.mcf)
 AIC(survreg(Surv(avgEvents)~time, data = mcf_ds, dist = 'weibull'))
 
 mcf_ds %>%
