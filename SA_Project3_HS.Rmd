@@ -1,0 +1,617 @@
+---
+title: "SA_Project3"
+author: "Haleigh Schwartz"
+date: "2024-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Set up
+```{r}
+library(tidyverse)
+library(skimr)
+library(survival)
+library(survminer)
+library(asaur)
+library(broom) 
+library(car)
+library(nlme)
+library(fitdistrplus)
+
+setwd("/Users/Haleigh/Documents/MSDS/Survival Analysis/RMDs_and_CSVs")
+
+```
+
+#Read in data, clean
+```{r}
+#basic cleaning
+
+#initialize empty list
+result_list = list()
+
+#set up for loop since doing same thing on all 4 ecosystems
+for (i in c("laravel", "npm", "r", "wp")){
+  
+  #read in data
+  meta_i = read_csv(paste("/Users/Haleigh/Documents/MSDS/Survival Analysis/githubSurvival/data/metadata-",i,".csv",sep=""))
+  or_i = read_csv(paste("/Users/Haleigh/Documents/MSDS/Survival Analysis/githubSurvival/data/oracle-",i,".csv",sep=""))
+  
+  #first lowercase the joining columns to make sure they all match
+  meta_i = meta_i %>%
+  mutate(repo_name = tolower(repo_name))
+  or_i = or_i %>%
+  mutate(repo = tolower(repo))
+  
+  #join
+  result_list[[i]] = full_join(meta_i, or_i, by=c("repo_name" = "repo"))
+  
+}
+
+#name individual datasets
+lar = result_list[["laravel"]]
+npm = result_list[["npm"]]
+r = result_list[["r"]]
+wp = result_list[["wp"]]
+
+#-------------------
+
+#clean for km curves/modeling 
+
+#add col specifying ecosystem
+lar = lar %>%
+  mutate(ecosystem = "lar")
+npm = npm %>%
+  mutate(ecosystem = "npm")
+r = r %>%
+  mutate(ecosystem = "r")
+wp = wp %>%
+  mutate(ecosystem = "wp")
+
+#horizontal join them all
+ds = lar %>%
+  bind_rows(npm) %>%
+  bind_rows(r) %>%
+  bind_rows(wp)
+
+#check
+ds_dim = dim(ds)
+lar_dim = dim(lar)
+r_dim = dim(r)
+wp_dim = dim(wp)
+npm_dim = dim(npm)
+
+ds_dim-(lar_dim+r_dim+wp_dim+npm_dim)
+
+#recode status col 
+ds = ds %>%
+  mutate(status2 = ifelse(status=="Dead",1,0))
+
+#interval times (marked as dead or alive if no activity/activity w/in 6mo), so add time1 and time2
+ds=ds %>%
+  mutate(
+    time1 = as.numeric(ifelse(status2==1, pmax(0.0001, months-6), pmax(0.0001, months))), #can't have time=0
+    time2 = as.numeric(ifelse(status2==1,pmax(0.0001, months),Inf)) #can't have time=0
+  )
+
+#remove duplicated and/or unnecessary columns
+ds=ds %>%
+  dplyr::select(-repo_name,-page, -index, -owner, -name, -type)
+
+```
+
+#EDA
+```{r}
+#switch out ds name
+summary(lar)
+
+ds %>%
+  filter(commits <= 10000)%>%
+  ggplot()+
+  geom_point(aes(x=months, y=commits, color=status)) +
+  labs(title="Number of commits over time by status \nfor all ecosystems")+
+  theme_classic()
+
+ds %>%
+  group_by(status) %>%
+  summarize(
+    mean_commits = mean(commits),
+    mean_authors = mean(authors),
+    mean_time = mean(months),
+    mean_pulls = mean(pulls),
+    mean_issues = mean(issues),
+    mean_comments = mean(comments),
+    mean_reviews = mean(reviews)
+  ) %>%
+  ggplot()+
+  geom_col(aes(x=status, y=mean_commits)) +
+  theme_classic() +
+  labs(title="Mean number of commits by repo status for all ecosystems")+
+  ylab("Mean number of commits")+
+  xlab("Repository status")
+
+lar %>%
+  filter(repoType=="Organization")%>% #change between user and Organization
+  group_by(status)%>%
+  summarize(
+    n = n()
+  ) %>%
+  ggplot()+
+  geom_col(aes(x=status,y=n))
+
+lar %>%
+  filter(repoType=="User")%>% #change between user and Organization
+  group_by(sizeUsers)%>%
+  summarize(
+    n=n()
+  ) %>%
+  ggplot()+
+  geom_col(aes(x=sizeUsers, y=n))
+
+```
+#Q1: Which ecosystems survived the longest?
+##Answer: R or np?
+```{r}
+#km curve
+km_eco = survfit(Surv(time=ds$time1, time2=ds$time2, type="interval2")~ds$ecosystem)
+#plot
+ggsurvplot(
+  fit=km_eco,
+  data=ds,
+  surv.median.line = "hv" 
+) + labs(title="Survival probability over time by ecosystem")
+
+#----------------------
+
+#stratify
+km_eco_strata = survfit(Surv(time=ds$time1, time2=ds$time2, type="interval2")~ds$ecosystem + strata(ds$repoType))
+
+ggsurvplot(
+  fit=km_eco_strata,
+  data=ds,
+  surv.median.line = "hv" 
+)
+
+#----------------------
+#----------------------
+
+#fit to model
+
+#----------------------
+
+#first see if weibull would be a good option
+
+#pull out necessary data from km curve
+km_basic=survfit(Surv(time=ds$time1, time2=ds$time2, type="interval2")~1)
+survProb=km_basic$surv
+survTime=km_basic$time
+
+#loglog 
+tibble(
+logLogSurvProb=log(-log(survProb)),
+logSurvTime=log(survTime)) %>%
+ggplot(aes(x=logSurvTime,y=logLogSurvProb)) +
+  geom_point(color="darkolivegreen") +
+  labs(title="Weibull plot: with time=0 (converted to 0.0001)")+
+  theme_classic()
+
+#looks okay, find the outlier ~(-2.4,-10)
+y <- exp(-exp(-2.4))
+print(y) #not an issue
+x = exp(-10)
+print(x) #this is the problem one, see where survTime~4.539993e-05
+
+survTime#it's the first one, it's because of all the time1=0.0001. see how many rows have months=0, will consider throwing out
+
+ds %>%
+  filter(months==0)%>%
+  summarize(count=n()) #months=0 97 times, that's almost 10% of ds so can't throw out. look at other models instead
+
+#----------------------
+
+#I feel like parametric should work because of how the km curve looks so try lognormal, exp and compare
+
+#make tibble that works for fitdistcens
+interval_ds = ds %>%
+  dplyr::select(time1,time2) %>%
+  rename(left=time1) %>%
+  rename(right=time2)
+
+#make the models. 
+lnormFit=fitdistcens(data.frame(interval_ds),distr = "lnorm")
+weibullFit=fitdistcens(data.frame(interval_ds),distr = "weibull")
+expFit=fitdistcens(data.frame(interval_ds),distr = "exponential")
+
+#couldn't get any to work, probably because of the same reason weibull was a bad fit. will try coxph
+
+#----------------------
+
+#coxph doesn't work with interval censored data
+survObject=Surv(time=ds$time1, time2=ds$time2, type="interval2")
+coxMod=coxph(survObject~ecosystem, data=ds) 
+summary(coxMod) 
+
+
+#---------------------
+
+#remove where time<1 and try parametric again
+
+#remove problem rows
+ds2=ds %>%
+  filter(time1>=1, time2>=1)
+
+#see if weibull would be a good fit
+km_basic2=survfit(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~1)
+survProb2=km_basic2$surv
+survTime2=km_basic2$time
+
+#loglog 
+tibble(
+logLogSurvProb=log(-log(survProb2)),
+logSurvTime=log(survTime2)) %>%
+ggplot(aes(x=logSurvTime,y=logLogSurvProb)) +
+  geom_point(color="darkolivegreen") +
+  labs(title="Weibull plot: without time=0")+
+  theme_classic() 
+
+#looks much better, step wise because interval censored
+
+#---------------------
+
+#compare to lnorm and exp
+
+#make tibble that works for fitdistcens
+interval_ds2 = ds2 %>%
+  dplyr::select(time1,time2) %>%
+  rename(left=time1) %>%
+  rename(right=time2)
+
+#make the models- still it thinks there are na's? even tried filtering down data to time > 1 and that didn't change anything.
+lnormFit=fitdistcens(data.frame(interval_ds2), "lnorm")
+weibullFit=fitdistcens(data.frame(interval_ds2),"weibull")
+expFit=fitdistcens(data.frame(interval_ds2),"exponential")
+
+interval_ds2 %>% filter(is.na(right))
+
+#---------------------
+
+#try to compare by using survreg and aic
+
+#first weibull - throw everything in and drop as needed
+weibull = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ecosystem, data=ds2)
+
+weibull1 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ecosystem+repoType+sizeUsers+authors+commits+pulls+issues+comments+reviews, data=ds2)
+summary(weibull1) 
+
+#drop repoType, issues, comments, and reviews
+weibull2 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$ecosystem+ds2$sizeUsers+ds2$authors+ds2$commits+ds2$pulls, data=ds2)
+summary(weibull2) #all are sig
+
+#try with giving different shapes to just the variable in question
+weibull3 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~strata(ecosystem)+sizeUsers+authors+commits+pulls, data=ds2)
+summary(weibull3)
+
+#compare with aic
+AIC(weibull)
+AIC(weibull1)
+AIC(weibull2) #they are all essentially the same (besides the first), go with simplest one (this one)
+AIC(weibull3)
+
+
+#try other parametric fits with simplest model and compare
+lnorm = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$ecosystem+ds2$sizeUsers+ds2$authors+ds2$commits+ds2$pulls, dist = "lognormal", data=ds2)
+summary(lnorm)
+
+exp = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ecosystem+sizeUsers+authors+commits+pulls, dist = "exponential", data=ds2)
+
+AIC(weibull2)
+AIC(lnorm) #this one is lowest but they're less than 5% different
+AIC(exp)
+
+#---------------------
+
+#move forward with lnorm
+summary(lnorm) #commits is no longer significant
+
+#redo km object with new ds
+km_eco2 = survfit(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$ecosystem, data=ds2)
+
+#graph predicted v actual
+km_eco_ds=tibble(
+  ecosystem=
+    rep(names(km_eco2$strata),
+      times=km_eco2$strata),
+    time=km_eco2$time,
+    surv=km_eco2$surv) %>%
+	mutate(
+		ecosystem=str_replace_all(ecosystem,"ds2\\$ecosystem=","eco_")
+	)
+
+#find predicted values from simple model
+newdata_eco=expand_grid(
+	ecosystem=paste("eco_",unique(ds2$ecosystem),sep=""),
+	sizeUsers=paste("size_",unique(ds2$sizeUsers),sep=""),
+	authors=paste("authors_",unique(ds2$authors),sep=""),
+	commits=paste("commits_",unique(ds2$commits),sep=""),
+	pulls=paste("pulls_",unique(ds2$pulls),sep="")
+) %>%
+	as.data.frame()
+
+lnorm_pred = predict(lnorm,
+        newdata=newdata_eco,
+        type="quantile",
+        p=seq(0.01,0.99,0.01),
+        se.fit=T)
+
+lnorm_pred_fit=tibble(quantile=seq(0.01,0.99,0.01),	as.data.frame(t(lnorm_pred$fit)) )
+
+names(lnorm_pred_fit)=c("p",
+                      paste("eco_",unique(ds2$ecosystem),sep=""),
+                      paste("size_",unique(ds2$sizeUsers),sep=""),
+                      paste("authors_",unique(ds2$authors),sep=""),
+                      paste("commits_",unique(ds2$commits),sep=""),
+                      paste("pulls_",unique(ds2$pulls),sep=""))
+
+#remove weird columns
+lnorm_pred_fit = lnorm_pred_fit[,1:596]
+
+#filter to just ecosystem first
+lnorm_pred_fit_eco = lnorm_pred_fit %>%
+  dplyr::select(p:eco_wp)
+
+#graph the predicted object
+lnorm_pred_fit_eco %>%
+  filter(!row_number() %in% c(400)) %>% #remove row with NAs
+	pivot_longer("eco_lar":"eco_wp",names_to="ecosystem",values_to = "deathTime_eco") %>%
+  # pivot_longer("size_2":"size_1",names_to="sizeUsers",values_to = "deathTime_sizeUsers") %>%
+  # pivot_longer("authors_8":"authors_156",names_to="authors",values_to = "deathTime_authors") %>%
+  # pivot_longer("commits_60":"commits_622",names_to="commits",values_to = "deathTime_commmits") %>%
+  # pivot_longer("pulls_2":"pulls_167",names_to="pulls",values_to = "deathTime_pulls") %>%
+	ggplot(aes(x=deathTime_eco,y=rev(p),color=ecosystem)) +
+	geom_line(linewidth=1.1) +
+	labs(
+		title="Survival probability over time per ecosystem",
+		x="Time (months)",
+		y="Survival probability"
+	) +
+	theme_minimal() +
+	geom_line(data=km_eco_ds,aes(x=time,y=surv), color="black")+
+  facet_wrap(ecosystem~.)+
+  xlim(0,72) #looks pretty bad
+
+
+#------------------------
+
+#what can we determine
+
+lnorm_test = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$ecosystem+ds2$sizeUsers+ds2$authors+ds2$pulls, dist = "lognormal", data=ds2)
+
+newdata_test=expand_grid(
+	ecosystem=paste("eco_",unique(ds2$ecosystem),sep=""),
+	sizeUsers=paste("size_",unique(ds2$sizeUsers),sep=""),
+	authors=paste("authors_",unique(ds2$authors),sep=""),
+	pulls=paste("pulls_",unique(ds2$pulls),sep="")
+) %>%
+	as.data.frame()
+
+newdata_test_tibble=expand_grid(
+	ecosystem=paste("eco_",unique(ds2$ecosystem),sep=""),
+	sizeUsers=paste("size_",unique(ds2$sizeUsers),sep=""),
+	authors=paste("authors_",unique(ds2$authors),sep=""),
+	pulls=paste("pulls_",unique(ds2$pulls),sep="")
+) %>%
+	as.data.frame()
+
+newdata_test_tibble2 = newdata_test_tibble[1:159060,]
+
+test_split = split(newdata_test_tibble2,rep(1:165,each=964))
+
+predict_median = predict(lnorm_test,test_split,type="quantile",p=0.5)
+
+sequence=seq(1,964,1)
+
+newdata_test_tibble2 = newdata_test_tibble[1:964,]
+
+empty=tibble(
+  ecosystem=NULL,
+  sizeUsers=NULL,
+  authors=NULL,
+  pulls=NULL,
+  predict_median=NULL
+)
+  
+for (i in seq(1,165,1)) {
+  x=test_split[i]
+  predict_median = predict(lnorm_test,x,type="quantile",p=0.5)
+  result = tibble(x,predict_median) %>%
+	  arrange(desc(predict_median))
+  top_result = result[1,]
+  empty=bind_rows(empty,top_result
+  )
+}  
+  
+
+tibble(newdata_test_tibble2,predict_median) %>%
+	arrange(desc(predict_median))
+
+ty
+
+```
+
+
+#Q2: Which repoType survives the longest? 
+##Answer: repoType is not significant
+```{r}
+
+#km curve
+km_repo = survfit(Surv(time=ds$time1, time2=ds$time2, type="interval2")~ds$repoType)
+#plot
+ggsurvplot(
+  fit=km_repo,
+  data=ds,
+  surv.median.line = "hv" 
+) +
+  labs(title="Survival probability over time by repoType")
+
+#--------------------
+
+#already know weibull would be a good fit when throw out time=0
+
+#first try weibull
+weibull_type = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$repoType, data=ds2)
+summary(weibull_type)
+
+#throw everything in and drop as needed
+weibull_type2 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~repoType+ecosystem+sizeUsers+authors+commits+pulls+issues+comments+reviews, data=ds2)
+summary(weibull_type2) 
+
+#no different than before. throw out issues, comments, and reviews
+weibull_type3 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~repoType+ecosystem+sizeUsers+authors+commits+pulls, data=ds2)
+summary(weibull_type3)
+
+#try with giving different shapes to just the variable in question
+weibull_type4 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~strata(repoType)+ecosystem+sizeUsers+authors+commits+pulls, data=ds2)
+summary(weibull_type4)
+
+#try other parametric fits with simplest model and compare
+lnorm_type = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~repoType+ecosystem+sizeUsers+authors+commits+pulls, dist = "lognormal", data=ds2)
+summary(lnorm_type)
+
+exp_type = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~repoType+ecosystem+sizeUsers+authors+commits+pulls, dist = "exponential", data=ds2)
+summary(exp_type)
+
+#just out of curiosity
+lnorm_type2 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~strata(repoType)+ecosystem+sizeUsers+authors+commits+pulls, dist = "lognormal", data=ds2)
+
+AIC(weibull_type)
+AIC(weibull_type2)
+AIC(weibull_type3)
+AIC(weibull_type4)
+AIC(lnorm_type) #as in other one, this is the best
+AIC(exp_type)
+AIC(lnorm_type2)
+
+```
+
+#Q2: Which sizeUsers survives the longest?
+##Answer:
+```{r}
+
+#km curve
+km_size = survfit(Surv(time=ds$time1, time2=ds$time2, type="interval2")~ds$sizeUsers)
+#plot
+ggsurvplot(
+  fit=km_size,
+  data=ds,
+  surv.median.line = "hv" 
+) + labs(title="Survival probability over time by repoType")
+
+#---------------------
+
+#first try weibull
+weibull_size = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$sizeUsers, data=ds2)
+summary(weibull_size)
+
+#throw everything in and drop as needed
+weibull_size2 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~sizeUsers+repoType+ecosystem+authors+commits+pulls+issues+comments+reviews, data=ds2)
+summary(weibull_size2) 
+
+#no different than before. throw out repoType, issues, comments, and reviews
+weibull_size3 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~sizeUsers+ecosystem+authors+commits+pulls, data=ds2)
+summary(weibull_size3)
+
+#try with giving different shapes to just the variable in question
+weibull_size4 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~strata(sizeUsers)+ecosystem+authors+commits+pulls, data=ds2)
+summary(weibull_type4)
+
+#try other parametric fits with simplest model and compare
+lnorm_size = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~sizeUsers+ecosystem+authors+commits+pulls, dist = "lognormal", data=ds2)
+summary(lnorm_size)
+
+exp_size = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~sizeUsers+ecosystem+authors+commits+pulls, dist = "exponential", data=ds2)
+summary(exp_size)
+
+#just out of curiosity
+lnorm_size2 = survreg(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~strata(sizeUsers)+ecosystem+authors+commits+pulls, dist = "lognormal", data=ds2)
+
+
+
+AIC(weibull_size)
+AIC(weibull_size2)
+AIC(weibull_size3)
+AIC(weibull_size4)
+AIC(lnorm_size) #still best one
+AIC(exp_size)
+AIC(lnorm_size2)
+
+
+#-----------------------
+
+#fit prediction data
+
+#redo km object with new ds
+km_size2 = survfit(Surv(time=ds2$time1, time2=ds2$time2, type="interval2")~ds2$sizeUsers, data=ds2)
+
+#graph predicted v actual
+km_size_ds=tibble(
+  sizeUsers=
+    rep(names(km_size2$strata),
+      times=km_size2$strata),
+    time=km_size2$time,
+    surv=km_size2$surv) %>%
+	mutate(
+		sizeUsers=str_replace_all(sizeUsers,"ds2\\$sizeUsers=","size_")
+	)
+
+#use same lnorm_pred_fit from above since essentially the same thing as if I were to do the same thing but with lnorm_size (rather than lnorm)
+
+#filter to just sizeUsers
+lnorm_pred_fit_size = lnorm_pred_fit %>%
+  relocate("size_2":"size_1", .before = "eco_lar") %>%
+  dplyr::select("p":"size_1")
+
+#graph the predicted object
+lnorm_pred_fit_size %>%
+  filter(!row_number() %in% c(400)) %>% #remove row with NAs
+	pivot_longer("size_2":"size_1",names_to="sizeUsers",values_to = "deathTime_size") %>%
+  # pivot_longer("size_2":"size_1",names_to="sizeUsers",values_to = "deathTime_sizeUsers") %>%
+  # pivot_longer("authors_8":"authors_156",names_to="authors",values_to = "deathTime_authors") %>%
+  # pivot_longer("commits_60":"commits_622",names_to="commits",values_to = "deathTime_commmits") %>%
+  # pivot_longer("pulls_2":"pulls_167",names_to="pulls",values_to = "deathTime_pulls") %>%
+	ggplot(aes(x=deathTime_size,y=rev(p),color=sizeUsers)) +
+	geom_line(linewidth=1.1) +
+	labs(
+		title="Survival probability over time per triad",
+		x="Time (months)",
+		y="Survival probability"
+	) +
+	theme_minimal() +
+	geom_line(data=km_size_ds,aes(x=time,y=surv), color="black")+
+  facet_wrap(sizeUsers~.)+
+  xlim(0,72) #looks pretty bad
+
+
+```
+
+Q4: Impact of type of event on survivability?
+```{r}
+#thought about trying this, but row # would be ~1.25mill and I wasn't sure my computers ram could handle it haha
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
